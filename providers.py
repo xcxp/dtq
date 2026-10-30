@@ -1,6 +1,7 @@
 """แหล่งคำคม (ไม่ต้องมี API key) + ตัวแปลไทย (ไม่ต้องสมัคร)"""
 from __future__ import annotations
 
+import os
 import asyncio
 import html
 import logging
@@ -93,6 +94,7 @@ SOURCES = {
 
 
 # ---------- แปลไทย ----------
+
 async def translate_th(session, text: str) -> Optional[str]:
     """EN -> TH คืน None ถ้าแปลไม่ได้ทุกเจ้า"""
     try:  # 1) Google (ไม่เป็นทางการ ไม่ต้องมี key)
@@ -100,15 +102,23 @@ async def translate_th(session, text: str) -> Optional[str]:
         data = await _get_json(session, "https://translate.googleapis.com/translate_a/single", params)
         th = "".join(seg[0] for seg in data[0] if seg and seg[0]).strip()
         if th:
+            log.info("แปลสำเร็จด้วย Google")
             return th
+        log.warning("Google ตอบกลับมาแต่ไม่มีคำแปล")
     except Exception as e:
         log.warning("แปลด้วย Google ไม่สำเร็จ: %s", e)
     try:  # 2) MyMemory (สำรอง)
-        data = await _get_json(session, "https://api.mymemory.translated.net/get",
-                               {"q": text, "langpair": "en|th"})
+        params = {"q": text, "langpair": "en|th"}
+        email = os.getenv("MYMEMORY_EMAIL", "").strip()  # ใส่อีเมลเพื่อเพิ่มโควตา ไม่ต้องสมัคร
+        if email:
+            params["de"] = email
+        data = await _get_json(session, "https://api.mymemory.translated.net/get", params)
         th = html.unescape((data.get("responseData") or {}).get("translatedText") or "").strip()
-        if th and "MYMEMORY WARNING" not in th.upper() and str(data.get("responseStatus")) == "200":
+        status = str(data.get("responseStatus"))
+        if th and "MYMEMORY WARNING" not in th.upper() and status == "200":
+            log.info("แปลสำเร็จด้วย MyMemory")
             return th
+        log.warning("MyMemory ตอบกลับแต่ใช้ไม่ได้ (status=%s): %s", status, th[:80])
     except Exception as e:
         log.warning("แปลด้วย MyMemory ไม่สำเร็จ: %s", e)
     return None

@@ -82,6 +82,13 @@ class QuoteStore:
         total, used = r["total"] or 0, r["used"] or 0
         return total, used, total - used
 
+    def peek(self):
+        """สุ่มดูคำคมที่ยังไม่เคยใช้ 1 ใบ โดยไม่ทำเครื่องหมายว่าใช้แล้ว (สำหรับ /test)"""
+        row = self.db.execute(
+            "SELECT id,text,author,source FROM quotes WHERE used_at IS NULL ORDER BY RANDOM() LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
     def claim(self, slot_key: str):
         """จองคำคมใบใหม่ให้รอบเวลานี้ คืน ('ok', dict) | ('done', None) | ('empty', None)"""
         if self.db.execute("SELECT 1 FROM slots WHERE slot_key=?", (slot_key,)).fetchone():

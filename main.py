@@ -207,8 +207,12 @@ class QuoteBot(discord.Client):
         self._test_last[gid] = monotonic()
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            sample = {"text": "Small steps every day still move you forward.",
-                      "author": "Quote Bot (test)", "source": "test", "number": 0}
+            row = self.store.peek()
+            if row is None:
+                await interaction.followup.send(
+                    "คลังคำคมยังว่างอยู่ รอเติมคลังเสร็จก่อน (ดู Console) แล้วลองใหม่", ephemeral=True)
+                return
+            sample = dict(row, source="test", number=0)
             thai = await translate_th(self.web, sample["text"])
             _, _, remaining = self.store.stats()
             embed = build_embed(sample, thai, nearest_slot(datetime.now(TH)), remaining)

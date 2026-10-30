@@ -35,9 +35,11 @@ ensure_deps()
 import asyncio
 import logging
 from datetime import datetime, time as dtime, timezone
+from time import monotonic
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
 
@@ -118,11 +120,28 @@ class QuoteBot(discord.Client):
         self.post_lock = None
         self.harvest_lock = None
         self._ready_once = False
+        self._test_last = {}
+        self.tree = app_commands.CommandTree(self)
+
+        @self.tree.command(name="test", description="ส่งข้อความทดสอบไปที่ช่องคำคม (ไม่กินโควตาคำคมจริง)")
+        @app_commands.guild_only()
+        @app_commands.default_permissions(manage_guild=True)
+        async def test_cmd(interaction: discord.Interaction) -> None:
+            await self.run_test(interaction)
 
     async def setup_hook(self) -> None:
         self.web = aiohttp.ClientSession(headers=HEADERS, timeout=TIMEOUT)
         self.post_lock = asyncio.Lock()      # สร้างตรงนี้ (ใน event loop จริง) กันบัก Python 3.8/3.9
         self.harvest_lock = asyncio.Lock()
+        for gid in TARGETS:                  # ลงทะเบียน /test เฉพาะ server ที่ระบุ (ขึ้นเร็ว)
+            try:
+                guild = discord.Object(id=gid)
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+                log.info("ลงทะเบียนคำสั่ง /test ใน server %s แล้ว", gid)
+            except Exception as e:
+                log.warning("ลงทะเบียนคำสั่งใน server %s ไม่สำเร็จ: %s "
+                            "(ต้องเชิญบอทด้วย scope applications.commands และบอทต้องอยู่ใน server นั้น)", gid, e)
         self.harvest_loop.start()
         self.daily_slots.start()
 
@@ -150,19 +169,56 @@ class QuoteBot(discord.Client):
             self.report(f"เติมคลังเพิ่ม {added} ใบ", warn=True)
 
     # ---------- ส่งข้อความ ----------
+    async def send_one(self, gid: int, cid: int, embed: discord.Embed) -> str:
+        """ส่งไป 1 ช่อง คืน '' ถ้าสำเร็จ หรือข้อความ error"""
+        try:
+            channel = self.get_channel(cid) or await self.fetch_channel(cid)
+            if getattr(channel, "guild", None) is None or channel.guild.id != gid:
+                msg = f"channel {cid} ไม่ได้อยู่ใน server {gid}"
+                log.error(msg)
+                return msg
+            await channel.send(embed=embed)
+            log.info("ส่งแล้ว -> server %s / channel %s", gid, cid)
+            return ""
+        except discord.Forbidden:
+            msg = f"บอทไม่มีสิทธิ์ในช่อง {cid} (ต้องมี View Channel, Send Messages, Embed Links)"
+            log.error(msg)
+            return msg
+        except Exception as e:
+            log.exception("ส่งไป server %s ไม่สำเร็จ", gid)
+            return f"ส่งไม่สำเร็จ: {e}"
+
     async def broadcast(self, embed: discord.Embed) -> None:
         for gid, cid in TARGETS.items():
-            try:
-                channel = self.get_channel(cid) or await self.fetch_channel(cid)
-                if getattr(channel, "guild", None) is None or channel.guild.id != gid:
-                    log.error("channel %s ไม่ได้อยู่ใน server %s ข้าม", cid, gid)
-                    continue
-                await channel.send(embed=embed)
-                log.info("ส่งแล้ว -> server %s / channel %s", gid, cid)
-            except discord.Forbidden:
-                log.error("บอทไม่มีสิทธิ์ในช่อง %s (ต้องมี View Channel, Send Messages, Embed Links)", cid)
-            except Exception:
-                log.exception("ส่งไป server %s ไม่สำเร็จ", gid)
+            await self.send_one(gid, cid, embed)
+
+    async def run_test(self, interaction: discord.Interaction) -> None:
+        gid = interaction.guild_id
+        if gid not in TARGETS:
+            await interaction.response.send_message("server นี้ไม่ได้อยู่ใน TARGETS ของบอท", ephemeral=True)
+            return
+        if not interaction.permissions.manage_guild:
+            await interaction.response.send_message("ต้องมีสิทธิ์ Manage Server ถึงจะใช้คำสั่งนี้ได้", ephemeral=True)
+            return
+        wait = 20 - (monotonic() - self._test_last.get(gid, -1000.0))
+        if wait > 0:
+            await interaction.response.send_message(f"รออีก {wait:.0f} วินาทีค่อยทดสอบใหม่นะ", ephemeral=True)
+            return
+        self._test_last[gid] = monotonic()
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            sample = {"text": "Small steps every day still move you forward.",
+                      "author": "Quote Bot (test)", "source": "test", "number": 0}
+            thai = await translate_th(self.web, sample["text"])
+            _, _, remaining = self.store.stats()
+            embed = build_embed(sample, thai, nearest_slot(datetime.now(TH)), remaining)
+            err = await self.send_one(gid, TARGETS[gid], embed)
+            lines = ["✅ ส่งข้อความทดสอบไปที่ช่องคำคมแล้ว" if not err else f"❌ {err}",
+                     "🇹🇭 แปลไทย: ได้" if thai else "🇹🇭 แปลไทย: ไม่ได้ (ดู Console ว่า Google/MyMemory ติดอะไร)"]
+            await interaction.followup.send("\n".join(lines), ephemeral=True)
+        except Exception:
+            log.exception("/test error")
+            await interaction.followup.send("เกิดข้อผิดพลาดภายใน ดูรายละเอียดใน Console", ephemeral=True)
 
     async def post_slot(self, date_str: str, hour: int) -> None:
         slot_key = f"{date_str}-{hour:02d}"
